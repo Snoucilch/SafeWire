@@ -1,0 +1,11 @@
+[package]
+name = "your-github-name/safewire"
+description = "Validated, rate-limited RemoteEvents for Roblox"
+version = "0.1.0"
+license = "MIT"
+authors = ["your-github-name"]
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+include = ["src", "src/**", "default.project.json", "wally.toml", "LICENSE", "README.md"]
+
+[dependencies]
