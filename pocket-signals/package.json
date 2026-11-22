@@ -1,0 +1,15 @@
+{
+  "name": "pocket-signals",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Indicator-based signal helper (userscript / bookmarklet) for the Pocket Option web chart, with a built-in win-rate tracker.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node build.js",
+    "e2e": "node test/e2e.js"
+  },
+  "devDependencies": {
+    "terser": "5.36.0"
+  }
+}
