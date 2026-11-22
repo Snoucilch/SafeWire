@@ -271,3 +271,15 @@ test('Tracker restores only valid saved records', () => {
   const tr = new C.Tracker([{ dir: 'CALL', entry: 1, exit: 2, result: 'win' }, { junk: true }, null]);
   assert.equal(tr.closed.length, 1);
 });
+
+test("paper trades do not block new signals on the same asset", () => {
+  const tr = new C.Tracker();
+  tr.add({ asset: "A", dir: "CALL", t: 0, entry: 10, expiryAt: 15, expiry: 15, paper: true });
+  assert.equal(tr.hasOpen("A"), false);
+  tr.add({ asset: "A", dir: "CALL", t: 0, entry: 10, expiryAt: 180, expiry: 180 });
+  assert.equal(tr.hasOpen("A"), true);
+  const done = tr.onTick("A", 15.2, 10.5);
+  assert.equal(done.length, 1);
+  assert.equal(done[0].expiry, 15);
+  assert.equal(tr.stats((x) => x.expiry === 15).wins, 1);
+});

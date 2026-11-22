@@ -139,7 +139,8 @@ async function panelText(page) {
         const s = window.__pocketSignals.state;
         for (let i = from + 1; i < live.length; i++) {
           window.__tick(window.__ws, ASSET, live[i][0], live[i][1]);
-          if (s.tracker.closed.length) return s.tracker.closed[s.tracker.closed.length - 1];
+          const main = s.tracker.closed.filter((x) => !x.paper);
+          if (main.length) return main[main.length - 1];
           if (i % 20 === 0) await new Promise((r) => setTimeout(r, 0));
         }
         return null;
@@ -154,9 +155,16 @@ async function panelText(page) {
     assert.match(text, /الفوز/);
     await shot(page, '2-result.png');
 
-    // history is persisted
+    // paper test: the same signal was also scored at 15s and 1m
+    const paper = await page.evaluate(() => window.__pocketSignals.state.tracker.closed.filter((x) => x.paper).map((x) => ({ expiry: x.expiry, result: x.result, held: x.exitT - x.t })));
+    assert.deepEqual(paper.map((x) => x.expiry).sort((a, b) => a - b), [15, 60]);
+    assert.ok(paper.every((x) => x.held >= x.expiry && x.held < x.expiry + 2));
+    console.log('A3b paper:', paper);
+    assert.match(text, /اختبار ورقي/);
+
+    // history is persisted (main + 2 paper)
     const savedCount = await page.evaluate(() => JSON.parse(localStorage.getItem('pocketSignals.v1.history') || '[]').length);
-    assert.equal(savedCount, 1);
+    assert.equal(savedCount, 3);
 
     // switching strategy updates the threshold choices
     await page.evaluate(() => {

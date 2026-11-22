@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pocket Signals — مساعد إشارات Pocket Option
 // @namespace    pocket-signals
-// @version      1.0.0
+// @version      1.1.0
 // @description  يقرأ أسعار الشارت من اتصال الموقع نفسه، يحسب مؤشرات فنية، ويعرض إشارات BUY/SELL مع عدّاد نتائج حقيقي.
 // @match        https://pocketoption.com/*
 // @match        https://*.pocketoption.com/*
@@ -27,7 +27,7 @@
 (function (root) {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
 
   /* =====================================================================
    * Core — pure logic (indicators, parsing, candles, tracking).
@@ -569,7 +569,7 @@
         this.seq = Date.now();
       }
       hasOpen(asset) {
-        return this.open.some((s) => s.asset === asset);
+        return this.open.some((s) => s.asset === asset && !s.paper);
       }
       add(sig) {
         const s = Object.assign({ id: ++this.seq, result: null }, sig);
@@ -659,7 +659,8 @@
   const PRE_WINDOW = 8; // seconds before candle close to show "get ready"
   const RESULT_SHOW = 20; // seconds to show a resolved result
   const TF_OPTIONS = [15, 30, 60, 120, 180, 300, 600];
-  const EXPIRY_OPTIONS = [30, 60, 120, 180, 300, 600, 900];
+  const PAPER_EXPIRIES = [15, 60]; // virtual trades opened alongside every signal
+  const EXPIRY_OPTIONS = [15, 30, 60, 120, 180, 300, 600, 900];
 
   const store = {
     get(k) {
@@ -805,7 +806,7 @@
     const done = state.tracker.onTick(a, t, p);
     if (done.length) {
       store.set('history', state.tracker.closed);
-      for (const d of done) if (d.asset === state.active) beep(d.result === 'win' ? [880, 1320] : d.result === 'loss' ? [330] : [600], false);
+      for (const d of done) if (d.asset === state.active && !d.paper) beep(d.result === 'win' ? [880, 1320] : d.result === 'loss' ? [330] : [600], false);
     }
     scheduleRender();
   }
@@ -814,18 +815,12 @@
     const closed = state.builder.candles.slice(0, -1);
     const ev = Core.evaluate(settings.strategy, closed, thr());
     if (!ev.ready || !ev.dir || state.tracker.hasOpen(asset)) return;
-    state.tracker.add({
-      asset,
-      dir: ev.dir,
-      t,
-      entry: p,
-      expiryAt: t + settings.expiry,
-      strategy: settings.strategy,
-      tf: settings.tf,
-      expiry: settings.expiry,
-      score: ev.score,
-      max: ev.max,
-    });
+    const base = { asset, dir: ev.dir, t, entry: p, strategy: settings.strategy, tf: settings.tf, score: ev.score, max: ev.max };
+    state.tracker.add(Object.assign({ expiry: settings.expiry, expiryAt: t + settings.expiry }, base));
+    // paper test: the same signal scored at other expiries, without blocking new signals
+    for (const x of PAPER_EXPIRIES) {
+      if (x !== settings.expiry) state.tracker.add(Object.assign({ expiry: x, expiryAt: t + x, paper: true }, base));
+    }
     beep(ev.dir === 'CALL' ? [660, 990] : [990, 660], true);
   }
 
@@ -1006,6 +1001,7 @@ input[type=number] { width: 60px; }
 .btns { display: flex; gap: 6px; margin: 6px 0 2px; }
 .btn { all: unset; flex: 1; text-align: center; padding: 4px; border-radius: 6px; background: #30364f; cursor: pointer; font-size: 11px; }
 .foot { display: grid; gap: 2px; }
+.pr { display: grid; grid-template-columns: 40px 1fr 40px 60px; gap: 4px; font-size: 11px; }
 .status { color: #8890ab; font-size: 10.5px; }
 .warn { color: #d9b25f; font-size: 10.5px; }
 `;
@@ -1023,6 +1019,7 @@ input[type=number] { width: 60px; }
     <div class="meta"><span class="clock"></span><span class="tfx"></span></div>
     <div class="votes"></div>
     <div class="box stats"></div>
+    <div class="box paper"></div>
     <details class="settings"><summary>⚙ الإعدادات</summary>
       <label>الأصل <select class="s-asset"></select></label>
       <label>الاستراتيجية <select class="s-strategy"></select></label>
@@ -1059,6 +1056,7 @@ input[type=number] { width: 60px; }
       tfx: $('.tfx'),
       votes: $('.votes'),
       stats: $('.stats'),
+      paper: $('.paper'),
       status: $('.status'),
       sAsset: $('.s-asset'),
       sStrategy: $('.s-strategy'),
@@ -1263,8 +1261,8 @@ input[type=number] { width: 60px; }
     e.tfx.innerHTML = num(tfLabel(tf)) + ' · صفقة ' + num(fmtDur(settings.expiry));
 
     // ----- signal box -----
-    const open = a ? state.tracker.open.find((x) => x.asset === a) : null;
-    const closed = state.tracker.closed;
+    const open = a ? state.tracker.open.find((x) => x.asset === a && !x.paper) : null;
+    const closed = state.tracker.closed.filter((x) => !x.paper);
     const lastRes = closed.length ? closed[closed.length - 1] : null;
     let cls = 'wait';
     let main = 'انتظار';
@@ -1328,6 +1326,7 @@ input[type=number] { width: 60px; }
     const st = state.tracker.stats(filt);
     const be = Core.breakeven(settings.payout);
     const recent = state.tracker.open
+      .filter((x) => !x.paper)
       .concat(closed.slice(-8))
       .sort((x, y) => x.t - y.t)
       .slice(-8)
@@ -1347,6 +1346,21 @@ input[type=number] { width: 60px; }
         `<div class="muted">آخر الإشارات: ${recent}</div>` +
         (st.wins + st.losses < 30 ? '<div class="muted">عينة صغيرة — لا تحكم قبل 30 إشارة.</div>' : '');
     }
+
+    // ----- paper test: the same signals at several expiries -----
+    const exps = [...new Set(PAPER_EXPIRIES.concat(settings.expiry))].sort((x, y) => x - y);
+    e.paper.innerHTML =
+      '<div>🧪 اختبار ورقي (نفس الإشارات)</div>' +
+      exps
+        .map((x) => {
+          const r = state.tracker.stats((z) => z.strategy === settings.strategy && z.tf === settings.tf && z.expiry === x);
+          const wr = r.winRate;
+          const pnl = ((r.wins * settings.payout) / 100 - r.losses) * settings.stake;
+          const cls = wr == null ? '' : wr > be ? 'good' : 'bad';
+          const money = (pnl >= 0 ? '+' : '') + pnl.toFixed(1) + '$';
+          return '<div class="pr"><span>' + num(fmtDur(x)) + '</span><span>✅' + num(r.wins) + ' ❌' + num(r.losses) + '</span><b class="' + cls + '">' + num(wr == null ? '—' : (wr * 100).toFixed(0) + '%') + '</b><b class="' + (pnl >= 0 ? 'good' : 'bad') + '">' + num(money) + '</b></div>';
+        })
+        .join('');
 
     // ----- status -----
     const ticks = s ? s.ticks.length : 0;
