@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pocket Signals — مساعد إشارات Pocket Option
 // @namespace    pocket-signals
-// @version      1.1.0
+// @version      1.2.0
 // @description  يقرأ أسعار الشارت من اتصال الموقع نفسه، يحسب مؤشرات فنية، ويعرض إشارات BUY/SELL مع عدّاد نتائج حقيقي.
 // @match        https://pocketoption.com/*
 // @match        https://*.pocketoption.com/*
@@ -27,7 +27,7 @@
 (function (root) {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
 
   /* =====================================================================
    * Core — pure logic (indicators, parsing, candles, tracking).
@@ -206,6 +206,9 @@
         },
       },
     };
+
+    // 'pattern' is evaluated by evaluatePattern() with a PatternBook; listed here for labels/settings.
+    STRATEGIES.pattern = { label: 'أنماط محفوظة (يتعلّم)', max: 100, threshold: 58, pattern: true, evaluate: () => [] };
 
     function evaluate(key, candles, threshold) {
       const s = STRATEGIES[key] || STRATEGIES.trend;
@@ -616,6 +619,127 @@
       }
     }
 
+    // ---------- pattern memory ----------
+    // Each candle -> symbol: direction (U/D/N) + body size vs the median of the previous 20 bodies (0 small, 1 normal, 2 big).
+    // Patterns of the last 3-4 candles (with size) and 5-6 candles (direction only) are counted against the next candle.
+    const VIEWS = [
+      { L: 3, size: true },
+      { L: 4, size: true },
+      { L: 5, size: false },
+      { L: 6, size: false },
+    ];
+    const MIN_LEARN = 150;
+
+    function candleSyms(cs, from) {
+      const out = [];
+      for (let i = from; i < cs.length; i++) {
+        const c = cs[i];
+        const d = c.c > c.o ? 'U' : c.c < c.o ? 'D' : 'N';
+        const bodies = [];
+        for (let j = Math.max(0, i - 20); j < i; j++) bodies.push(Math.abs(cs[j].c - cs[j].o));
+        bodies.sort((a, b) => a - b);
+        const m = bodies.length ? bodies[bodies.length >> 1] : 0;
+        const b = Math.abs(c.c - c.o);
+        const sz = !m ? 1 : b < 0.5 * m ? 0 : b > 1.5 * m ? 2 : 1;
+        out.push({ d, s: d + sz });
+      }
+      return out;
+    }
+
+    function keyOf(syms, end, v) {
+      if (end - v.L + 1 < 0) return null;
+      let k = v.L + (v.size ? 's:' : 'd:');
+      for (let j = end - v.L + 1; j <= end; j++) k += (v.size ? syms[j].s : syms[j].d) + ',';
+      return k;
+    }
+
+    class PatternBook {
+      constructor(minN, minP) {
+        this.minN = minN || 15; // a pattern must have been seen this many times
+        this.minP = minP || 0.58; // and point the same way this often
+        this.reset();
+      }
+      reset() {
+        this.map = new Map();
+        this.right = 0;
+        this.wrong = 0;
+        this.count = 0;
+      }
+      predictSyms(syms, end) {
+        let best = null;
+        for (const v of VIEWS) {
+          const k = keyOf(syms, end, v);
+          const e = k && this.map.get(k);
+          if (!e) continue;
+          const n = e.U + e.D;
+          if (n < this.minN) continue;
+          const up = e.U >= e.D;
+          const p = ((up ? e.U : e.D) + 1) / (n + 2); // Laplace-smoothed
+          if (p >= this.minP && (!best || p > best.p || (p === best.p && v.L > best.L))) best = { dir: up ? 'CALL' : 'PUT', p, n, L: v.L, key: k };
+        }
+        return best;
+      }
+      // Learn candle i as the outcome of the patterns ending at i-1.
+      // The prediction is checked BEFORE learning, so right/wrong is an honest out-of-sample score.
+      learn(syms, i) {
+        this.count++;
+        if (i < 1) return;
+        const out = syms[i].d;
+        if (out === 'N') return;
+        const pr = this.predictSyms(syms, i - 1);
+        if (pr) {
+          if ((pr.dir === 'CALL') === (out === 'U')) this.right++;
+          else this.wrong++;
+        }
+        for (const v of VIEWS) {
+          const k = keyOf(syms, i - 1, v);
+          if (!k) continue;
+          let e = this.map.get(k);
+          if (!e) this.map.set(k, (e = { U: 0, D: 0 }));
+          e[out]++;
+        }
+      }
+      rebuild(cs) {
+        this.reset();
+        const syms = candleSyms(cs, 0);
+        for (let i = 0; i < syms.length; i++) this.learn(syms, i);
+      }
+      learnLast(cs) {
+        const syms = candleSyms(cs, Math.max(0, cs.length - 30));
+        this.learn(syms, syms.length - 1);
+      }
+      predict(cs) {
+        const syms = candleSyms(cs, Math.max(0, cs.length - 30));
+        return this.predictSyms(syms, syms.length - 1);
+      }
+      strong() {
+        let n = 0;
+        for (const e of this.map.values()) {
+          const t = e.U + e.D;
+          if (t >= this.minN && (Math.max(e.U, e.D) + 1) / (t + 2) >= this.minP) n++;
+        }
+        return n;
+      }
+      get accuracy() {
+        const t = this.right + this.wrong;
+        return t ? this.right / t : null;
+      }
+    }
+
+    function evaluatePattern(book, candles, minPct) {
+      const base = { have: book.count, need: MIN_LEARN, max: 100, threshold: minPct, votes: [] };
+      if (book.count < MIN_LEARN || candles.length < 27) return Object.assign(base, { ready: false, dir: null, score: 0 });
+      const pr = book.predict(candles);
+      const v = pr ? (pr.dir === 'CALL' ? 1 : -1) : 0;
+      const pct = pr ? Math.round(pr.p * 100) : 0;
+      return Object.assign(base, {
+        ready: true,
+        dir: pr ? pr.dir : null,
+        score: v * pct,
+        votes: [{ key: 'pat', label: 'نمط محفوظ', short: pr ? 'نمط ' + pr.L + ' شموع' : 'لا نمط مؤكد الآن', vote: v, value: pr ? pct + '% من ' + pr.n : '' }],
+      });
+    }
+
     // Minimum win rate needed to break even at a given payout (92% -> 52.08%).
     const breakeven = (payoutPct) => 1 / (1 + payoutPct / 100);
 
@@ -639,6 +763,10 @@
       CandleBuilder,
       Tracker,
       breakeven,
+      MIN_LEARN,
+      candleSyms,
+      PatternBook,
+      evaluatePattern,
     };
   })();
 
@@ -685,7 +813,7 @@
     tf: 60,
     syncTf: true,
     expiry: 180,
-    thresholds: { trend: 4, reversal: 3 },
+    thresholds: { trend: 4, reversal: 3, pattern: 58 },
     payout: 92,
     stake: 10,
     sound: true,
@@ -706,6 +834,7 @@
     active: null,
     builder: new Core.CandleBuilder(settings.tf),
     tracker: new Core.Tracker(store.get('history') || []),
+    mem: { key: null, candles: [], book: new Core.PatternBook() },
     lastTickT: 0,
     lastTickLocal: 0,
     sockets: 0,
@@ -730,6 +859,52 @@
     state.builder = new Core.CandleBuilder(settings.tf);
     const s = state.active && state.series.get(state.active);
     if (s) state.builder.rebuild(s.ticks, s.serverList(settings.tf));
+    loadMemory();
+  }
+
+  // ---------- candle memory (saved per asset + timeframe) ----------
+  const MEM_MAX = 5000;
+  function loadMemory() {
+    const a = state.active;
+    if (!a) return;
+    const key = 'candles.' + a + '.' + settings.tf;
+    const map = new Map();
+    if (state.mem.key !== key) {
+      for (const r of store.get(key) || []) {
+        if (Array.isArray(r) && r.length === 5 && r.every(Number.isFinite)) map.set(r[0], { t: r[0], o: r[1], h: r[2], l: r[3], c: r[4] });
+      }
+    } else for (const c of state.mem.candles) map.set(c.t, c);
+    const built = state.builder.candles.slice(0, -1); // closed candles only
+    built.forEach((c, i) => {
+      if (i === 0 && map.has(c.t)) return; // first built candle may be partial
+      map.set(c.t, { t: c.t, o: c.o, h: c.h, l: c.l, c: c.c });
+    });
+    state.mem.key = key;
+    state.mem.candles = [...map.values()].sort((x, y) => x.t - y.t).slice(-MEM_MAX);
+    state.mem.book.minP = settings.thresholds.pattern / 100;
+    state.mem.book.rebuild(state.mem.candles);
+    saveMemory();
+  }
+  function saveMemory() {
+    if (state.mem.key) store.set(state.mem.key, state.mem.candles.map((c) => [c.t, c.o, c.h, c.l, c.c]));
+  }
+  function remember(c) {
+    const m = state.mem.candles;
+    if (!state.mem.key || (m.length && c.t <= m[m.length - 1].t)) return;
+    m.push({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c });
+    if (m.length > MEM_MAX) m.splice(0, m.length - MEM_MAX);
+    state.mem.book.learnLast(m);
+    saveMemory();
+  }
+  function evalFor(includeForming) {
+    const b = state.builder.candles;
+    if (settings.strategy === 'pattern') {
+      let cs = state.mem.candles;
+      const f = b[b.length - 1];
+      if (includeForming && f && (!cs.length || f.t > cs[cs.length - 1].t)) cs = cs.concat([f]);
+      return Core.evaluatePattern(state.mem.book, cs, thr());
+    }
+    return Core.evaluate(settings.strategy, includeForming ? b : b.slice(0, -1), thr());
   }
 
   function setActive(a) {
@@ -812,8 +987,9 @@
   }
 
   function onCandleClose(asset, t, p) {
-    const closed = state.builder.candles.slice(0, -1);
-    const ev = Core.evaluate(settings.strategy, closed, thr());
+    const cs = state.builder.candles;
+    if (cs.length >= 2) remember(cs[cs.length - 2]);
+    const ev = evalFor(false);
     if (!ev.ready || !ev.dir || state.tracker.hasOpen(asset)) return;
     const base = { asset, dir: ev.dir, t, entry: p, strategy: settings.strategy, tf: settings.tf, score: ev.score, max: ev.max };
     state.tracker.add(Object.assign({ expiry: settings.expiry, expiryAt: t + settings.expiry }, base));
@@ -1019,6 +1195,7 @@ input[type=number] { width: 60px; }
     <div class="meta"><span class="clock"></span><span class="tfx"></span></div>
     <div class="votes"></div>
     <div class="box stats"></div>
+    <div class="box mem"></div>
     <div class="box paper"></div>
     <details class="settings"><summary>⚙ الإعدادات</summary>
       <label>الأصل <select class="s-asset"></select></label>
@@ -1057,6 +1234,7 @@ input[type=number] { width: 60px; }
       votes: $('.votes'),
       stats: $('.stats'),
       paper: $('.paper'),
+      mem: $('.mem'),
       status: $('.status'),
       sAsset: $('.s-asset'),
       sStrategy: $('.s-strategy'),
@@ -1124,6 +1302,10 @@ input[type=number] { width: 60px; }
     els.sThr.addEventListener('change', () => {
       settings.thresholds[settings.strategy] = +els.sThr.value;
       saveSettings();
+      if (settings.strategy === 'pattern') {
+        state.mem.book.minP = settings.thresholds.pattern / 100;
+        state.mem.book.rebuild(state.mem.candles);
+      }
       scheduleRender();
     });
     els.sPayout.addEventListener('change', () => {
@@ -1233,9 +1415,11 @@ input[type=number] { width: 60px; }
       e.sTf.value = String(settings.tf);
       e.sSync.checked = settings.syncTf;
       e.sExpiry.value = String(settings.expiry);
-      e.sThr.innerHTML = Array.from({ length: st.max }, (_, i) => i + 1)
-        .map((v) => `<option value="${v}">${v} من ${st.max}</option>`)
-        .join('');
+      e.sThr.innerHTML = st.pattern
+        ? [55, 58, 60, 62, 65, 70].map((v) => `<option value="${v}">${v}%</option>`).join('')
+        : Array.from({ length: st.max }, (_, i) => i + 1)
+            .map((v) => `<option value="${v}">${v} من ${st.max}</option>`)
+            .join('');
       e.sThr.value = String(thr());
       e.sPayout.value = settings.payout;
       e.sStake.value = settings.stake;
@@ -1254,7 +1438,8 @@ input[type=number] { width: 60px; }
     const tf = settings.tf;
     const hasData = !!(s && s.ticks.length);
     const left = hasData ? Math.max(0, Math.ceil(state.builder.bucket(now) + tf - now)) : null;
-    const live = Core.evaluate(settings.strategy, state.builder.candles, thr());
+    // patterns: show the prediction for the current candle; look one candle ahead only right before it closes
+    const live = evalFor(settings.strategy !== 'pattern' || (left != null && left <= PRE_WINDOW));
 
     e.asset.textContent = a ? prettyAsset(a) : '—';
     e.clock.innerHTML = left == null ? 'الشمعة: —' : 'تغلق الشمعة بعد ' + num(fmtDur(left));
@@ -1291,8 +1476,8 @@ input[type=number] { width: 60px; }
       badge = main;
       sub = (lastRes.dir === 'CALL' ? '▲ ' : '▼ ') + num(fmtP(lastRes.entry)) + ' ← ' + num(fmtP(lastRes.exit));
     } else if (!live.ready) {
-      main = 'تجميع الشموع';
-      sub = num(live.have + '/' + live.need) + ' — غيّر الفريم في الشارت ثم أرجعه لتحميل التاريخ فوراً';
+      main = settings.strategy === 'pattern' ? 'يتعلّم الأنماط' : 'تجميع الشموع';
+      sub = num(live.have + '/' + live.need) + ' شمعة — غيّر الفريم في الشارت ثم أرجعه لتحميل التاريخ فوراً';
     } else if (left != null && left <= PRE_WINDOW && live.dir) {
       cls = live.dir === 'CALL' ? 'pre-call' : 'pre-put';
       main = live.dir === 'CALL' ? 'استعد ▲ شراء' : 'استعد ▼ بيع';
@@ -1315,7 +1500,7 @@ input[type=number] { width: 60px; }
           .map((v) => {
             const c = v.vote > 0 ? 'up' : v.vote < 0 ? 'down' : 'flat';
             const arrow = v.vote > 0 ? '▲' : v.vote < 0 ? '▼' : '•';
-            const val = v.key === 'rsi' || v.key === 'stoch' ? ' ' + num(v.value) : '';
+            const val = (v.key === 'rsi' || v.key === 'stoch' || v.key === 'pat') && v.value ? ' ' + num(v.value) : '';
             return `<span class="chip ${c}" title="${esc(v.label + ': ' + v.value)}">${esc(v.short)}${val} ${arrow}</span>`;
           })
           .join('')
@@ -1346,6 +1531,16 @@ input[type=number] { width: 60px; }
         `<div class="muted">آخر الإشارات: ${recent}</div>` +
         (st.wins + st.losses < 30 ? '<div class="muted">عينة صغيرة — لا تحكم قبل 30 إشارة.</div>' : '');
     }
+
+    // ----- candle memory + honest pattern accuracy -----
+    const bk = state.mem.book;
+    const tested = bk.right + bk.wrong;
+    const acc = bk.accuracy;
+    e.mem.innerHTML =
+      '<div>🧠 ذاكرة: ' + num(state.mem.candles.length.toLocaleString('en')) + ' شمعة · ' + num(bk.strong()) + ' نمط متكرر</div>' +
+      '<div class="muted">دقة توقع الأنماط قبل تعلّمها: ' +
+      (tested ? '<b class="' + (acc > be ? 'good' : 'bad') + '">' + num((acc * 100).toFixed(1) + '%') + '</b> من ' + num(tested) + ' توقع' : 'لا يوجد بعد') +
+      '</div>';
 
     // ----- paper test: the same signals at several expiries -----
     const exps = [...new Set(PAPER_EXPIRIES.concat(settings.expiry))].sort((x, y) => x - y);

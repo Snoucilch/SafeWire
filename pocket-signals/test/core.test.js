@@ -283,3 +283,56 @@ test("paper trades do not block new signals on the same asset", () => {
   assert.equal(done[0].expiry, 15);
   assert.equal(tr.stats((x) => x.expiry === 15).wins, 1);
 });
+
+function seqCandles(dirs) {
+  let p = 100;
+  return dirs.map((d, i) => {
+    const o = p;
+    p += d === 'U' ? 0.1 : d === 'D' ? -0.1 : 0;
+    return { t: 1_700_000_000 + i * 60, o, c: p, h: Math.max(o, p) + 0.02, l: Math.min(o, p) - 0.02 };
+  });
+}
+
+test('PatternBook learns a repeating pattern and predicts the next candle', () => {
+  const dirs = [];
+  for (let i = 0; i < 300; i++) dirs.push(...'UUD');
+  const cs = seqCandles(dirs);
+  const book = new C.PatternBook(15, 0.58);
+  book.rebuild(cs);
+  assert.equal(book.count, 900);
+  assert.ok(book.accuracy > 0.95, 'accuracy ' + book.accuracy);
+  // history ends with ...U,U,D -> next should be U; after U,U -> D
+  assert.equal(book.predict(cs).dir, 'CALL');
+  assert.equal(book.predict(cs.slice(0, -1)).dir, 'PUT');
+  const ev = C.evaluatePattern(book, cs, 58);
+  assert.equal(ev.ready, true);
+  assert.equal(ev.dir, 'CALL');
+  assert.ok(ev.score > 90);
+});
+
+test('PatternBook on random candles: honest accuracy stays near 50%', () => {
+  const r = rng(42);
+  const dirs = Array.from({ length: 5000 }, () => (r() < 0.5 ? 'U' : 'D'));
+  const book = new C.PatternBook(15, 0.58);
+  book.rebuild(seqCandles(dirs));
+  const tested = book.right + book.wrong;
+  assert.ok(tested > 50, 'tested ' + tested);
+  assert.ok(Math.abs(book.accuracy - 0.5) < 0.06, 'accuracy ' + book.accuracy);
+});
+
+test('PatternBook learnLast matches a full rebuild', () => {
+  const r = rng(3);
+  const cs = seqCandles(Array.from({ length: 400 }, () => (r() < 0.6 ? 'U' : 'D')));
+  const a = new C.PatternBook();
+  a.rebuild(cs.slice(0, 300));
+  for (let i = 301; i <= 400; i++) a.learnLast(cs.slice(0, i));
+  const b = new C.PatternBook();
+  b.rebuild(cs);
+  assert.deepEqual([a.right, a.wrong, a.count, a.map.size], [b.right, b.wrong, b.count, b.map.size]);
+});
+
+test('evaluatePattern is not ready before enough candles are learned', () => {
+  const book = new C.PatternBook();
+  book.rebuild(seqCandles(Array(50).fill('U')));
+  assert.equal(C.evaluatePattern(book, seqCandles(Array(50).fill('U')), 58).ready, false);
+});

@@ -237,6 +237,68 @@ async function panelText(page) {
     console.log('B2 toggle ok');
   }
 
+  // ---------- C: candle memory + pattern strategy ----------
+  {
+    const page = await (await browser.newContext({ viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: +(process.env.DSF || 1) })).newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const PAT = "UUD";
+    const N = 600;
+    const start = T0 - N * 60;
+    // remembered candles from earlier sessions
+    const stored = [];
+    let p = 174;
+    for (let i = 0; i < N; i++) {
+      const o = p;
+      p += PAT[i % 3] === "U" ? 0.05 : -0.05;
+      stored.push([start + i * 60, o, Math.max(o, p) + 0.01, Math.min(o, p) - 0.01, +p.toFixed(3)]);
+    }
+    // live ticks continuing the same pattern
+    const ticks = [];
+    for (let m = 0; m < 8; m++) {
+      const up = PAT[(N + m) % 3] === "U";
+      for (let k = 0; k < 60; k++) {
+        ticks.push([T0 + m * 60 + k + 0.2, +(p + (up ? 1 : -1) * 0.05 * (k / 59)).toFixed(4)]);
+      }
+      p += up ? 0.05 : -0.05;
+    }
+    await page.addInitScript(FAKE_WS);
+    await page.addInitScript(({ stored }) => {
+      localStorage.setItem("pocketSignals.v1.candles.EURJPY_otc.60", JSON.stringify(stored));
+      localStorage.setItem("pocketSignals.v1.settings", JSON.stringify({ strategy: "pattern", expiry: 60 }));
+    }, { stored });
+    await page.addInitScript(SRC);
+    await page.goto(url);
+    await page.waitForFunction(() => document.querySelector("pocket-signals"));
+    const sig = await page.evaluate(async ({ ASSET, ticks }) => {
+      const ws = new WebSocket("wss://x/socket.io/?EIO=4&transport=websocket");
+      ws.send("42[\"changeSymbol\",{\"asset\":\"" + ASSET + "\",\"period\":60}]");
+      const s = window.__pocketSignals.state;
+      for (let i = 0; i < ticks.length; i++) {
+        window.__tick(ws, ASSET, ticks[i][0], ticks[i][1]);
+        if (s.tracker.open.some((x) => !x.paper)) return { i, sig: s.tracker.open.find((x) => !x.paper), mem: s.mem.candles.length, acc: s.mem.book.accuracy, strong: s.mem.book.strong() };
+        if (i % 30 === 0) await new Promise((r) => setTimeout(r, 0));
+      }
+      return { none: true, mem: s.mem.candles.length, count: s.mem.book.count };
+    }, { ASSET, ticks });
+    assert.ok(sig.sig, "pattern signal expected: " + JSON.stringify(sig));
+    const minute = Math.floor((sig.sig.t - T0) / 60); // signal at the start of this live minute
+    const expected = PAT[(N + minute) % 3] === "U" ? "CALL" : "PUT";
+    assert.equal(sig.sig.dir, expected);
+    assert.equal(sig.sig.strategy, "pattern");
+    assert.ok(sig.acc > 0.95);
+    console.log("C1 pattern signal:", sig.sig.dir, "score", sig.sig.score, "memory", sig.mem, "candles, accuracy", sig.acc.toFixed(3), "patterns", sig.strong);
+    await page.waitForTimeout(600);
+    const text = await panelText(page);
+    assert.match(text, /ذاكرة/);
+    assert.match(text, /نمط/);
+    await shot(page, "4-pattern.png");
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("pocketSignals.v1.candles.EURJPY_otc.60")).length);
+    assert.ok(saved > N, "memory saved " + saved);
+    assert.deepEqual(errors, []);
+    console.log("C2 memory persisted:", saved, "candles");
+  }
+
   await browser.close();
   console.log('e2e: all checks passed');
 })().catch((e) => {
