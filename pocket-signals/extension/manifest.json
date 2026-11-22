@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Pocket Signals",
+  "version": "1.2.0",
+  "description": "Indicator and pattern signals panel for the Pocket Option web chart (read-only, with a built-in win-rate tracker).",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pocketoption.com/*",
+        "https://*.pocketoption.com/*",
+        "https://po.trade/*",
+        "https://*.po.trade/*",
+        "https://po2.trade/*",
+        "https://*.po2.trade/*"
+      ],
+      "js": ["pocket-signals.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}

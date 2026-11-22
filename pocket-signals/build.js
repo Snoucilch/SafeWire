@@ -24,3 +24,17 @@ const { minify } = require('terser');
   console.error(e);
   process.exit(1);
 });
+
+// Unpacked browser extension (Brave/Chrome/Edge): dist/pocket-signals-extension.zip
+(async () => {
+  const { execFileSync } = require('child_process');
+  const dir = path.join(__dirname, 'dist', 'extension');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(path.join(__dirname, 'extension', 'manifest.json'), path.join(dir, 'manifest.json'));
+  fs.copyFileSync(path.join(__dirname, 'pocket-signals.user.js'), path.join(dir, 'pocket-signals.js'));
+  const zip = path.join(__dirname, 'dist', 'pocket-signals-extension.zip');
+  fs.rmSync(zip, { force: true });
+  execFileSync('python3', ['-c', 'import shutil,sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2])', zip.replace(/\.zip$/, ''), dir]);
+  console.log('extension -> dist/pocket-signals-extension.zip');
+})();
